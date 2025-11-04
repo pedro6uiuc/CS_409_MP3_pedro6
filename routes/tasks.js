@@ -1,17 +1,30 @@
 const Task = require('../models/task');
 const User = require('../models/user');
+const { buildQueryParams } = require('../routes/helpers/queryBuilder.js');
 
 module.exports = function (router) {
     const tasksRoute = router.route('/tasks');
     const tasksIdRoute = router.route('/tasks/:id');
     tasksRoute.get(async (req, res) => {
       try {
-        const tasks = await Task.find();
-        res.status(200).json({message: 'OK',data: tasks});
+        const { where, sort, select, skip, limit, count } = buildQueryParams(req, 100);
+
+        if (count) {
+          const total = await Task.countDocuments(where);
+          return res.status(200).json({ message: 'OK', data: total });
+        }
+
+        const tasks = await Task.find(where)
+          .sort(sort)
+          .select(select)
+          .skip(skip)
+          .limit(limit);
+
+        res.status(200).json({ message: 'OK', data: tasks });
       } catch (err) {
-        res.status(500).json({ message: 'Server error', data: err });
+        res.status(400).json({ message: err.message });
       }
-    })
+    });
 
     tasksRoute.post(async (req, res) => {
       try {
@@ -37,15 +50,15 @@ module.exports = function (router) {
 
     tasksIdRoute.get(async (req, res) => {
       try {
-        const task = await Task.findById(req.params.id);
-        if (!task) {
-          return res.status(404).json({ message: 'Task not found' });
+        const { select } = buildQueryParams(req);
+        const task = await Task.findById(req.params.id).select(select);
+
+        if (!task) return res.status(404).json({ message: 'Task not found' });
+          res.status(200).json({ message: 'OK', data: task });
+        } catch (err) {
+          res.status(500).json({ message: 'Server error', data: err.message });
         }
-        res.status(200).json({message: 'OK',data: task});
-      } catch (err) {
-        res.status(500).json({ message: 'Server error', data: err });
-      }
-    })
+      });
 
     tasksIdRoute.put(async (req, res) => {
     try {
@@ -129,7 +142,7 @@ module.exports = function (router) {
 
         await Task.findByIdAndDelete(taskId);
 
-        res.status(204).send();
+        res.status(204).json({message: 'OK', data:{}});
 
         } catch (err) {
         console.error(err);

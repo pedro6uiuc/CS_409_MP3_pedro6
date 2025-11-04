@@ -1,17 +1,34 @@
 const User = require('../models/user');
 const Task = require('../models/task');
+const { buildQueryParams } = require('../routes/helpers/queryBuilder.js');
 
 module.exports = function (router) {
     const usersRoute =  router.route('/users');
     const usersIdRoute = router.route('/users/:id');
+
     usersRoute.get(async (req, res) => {
-            try {
-                const users = await User.find();
-                res.status(200).json({ message: 'OK', data: users });
-            } catch (err) {
-                res.status(500).json({ message: 'Server error', data: err });
+        try {
+            const { where, sort, select, skip, limit, count } = buildQueryParams(req, 0);
+
+            if (count) {
+            const total = await User.countDocuments(where);
+            return res.status(200).json({ message: 'OK', data: total });
             }
-        })
+
+            const query = User.find(where)
+            .sort(sort)
+            .select(select)
+            .skip(skip);
+
+            if (limit > 0) query.limit(limit);
+
+            const users = await query;
+            res.status(200).json({ message: 'OK', data: users });
+        } catch (err) {
+            res.status(400).json({ message: err.message });
+        }
+        });
+    //Users cannot be created with lists of task to guarantee two-way reference.
     usersRoute.post(async (req, res) => {
             try {
                 const { name, email } = req.body;
@@ -33,86 +50,82 @@ module.exports = function (router) {
 
 
     usersIdRoute.get(async (req, res) => {
-            try {
-                const user = await User.findById(req.params.id);
-                if (!user) return res.status(404).json({ message: 'User not found', data: null });
-                res.status(200).json({ message: 'OK', data: user });
-            } catch (err) {
-                res.status(500).json({ message: 'Server error', data: err });
-            }
-        })
+        try {
+            const { select } = buildQueryParams(req);
+            const user = await User.findById(req.params.id).select(select);
+
+            if (!user) return res.status(404).json({ message: 'Task not found' });
+            res.status(200).json({ message: 'OK', data: user });
+        } catch (err) {
+            res.status(500).json({ message: 'Server error', data: err.message });
+        }
+        });
     usersIdRoute.put(async (req, res) => {
         try {
-        const userId = req.params.id;
+            const userId = req.params.id;
+            const user = await User.findById(userId);
+            if (!user) return res.status(404).json({ message: 'User not found' });
 
+            const oldPendingTasks = user.pendingTasks.map(id => id.toString());
+            const { name, email, pendingTasks, dateCreated } = req.body;
 
-        const user = await User.findById(userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
+            if (name !== undefined) user.name = name;
+            if (email !== undefined) user.email = email;
+            if (dateCreated !== undefined) user.dateCreated = dateCreated;
 
-        const oldPendingTasks = user.pendingTasks.map(id => id.toString());
+            if (pendingTasks) {
+            // remove duplicates from request input
+            const newPendingTasks = [...new Set(pendingTasks.map(id => id.toString()))];
 
-
-        const { name, email, pendingTasks, completedTasks } = req.body;
-
-        if (name !== undefined) user.name = name;
-        if (email !== undefined) user.email = email;
-
-        if (pendingTasks) {
-
-            const newPendingTasks = pendingTasks.map(id => id.toString());
-
-            const removedTasks = oldPendingTasks.filter(
-            id => !newPendingTasks.includes(id)
-            );
+            // Find removed tasks (tasks no longer in the user's list)
+            const removedTasks = oldPendingTasks.filter(id => !newPendingTasks.includes(id));
 
             for (const taskId of removedTasks) {
-            const task = await Task.findById(taskId);
-            if (task && task.assignedUser === userId) {
+                const task = await Task.findById(taskId);
+                if (task && task.assignedUser === userId) {
                 task.assignedUser = '';
                 task.assignedUserName = 'unassigned';
                 await task.save();
-            }
-            }
-
-
-            const addedTasks = newPendingTasks.filter(
-            id => !oldPendingTasks.includes(id)
-            );
-
-            for (const taskId of addedTasks) {
-            const task = await Task.findById(taskId);
-            if (!task) return res.status(400).json({ message: `Task ${taskId} not found` });
-
-            if (task.assignedUser && task.assignedUser !== userId) {
-                const oldUser = await User.findById(task.assignedUser);
-                if (oldUser) {
-                oldUser.pendingTasks = oldUser.pendingTasks.filter(
-                    id => id.toString() !== task._id.toString()
-                );
-                await oldUser.save();
                 }
             }
 
-            task.assignedUser = userId;
-            task.assignedUserName = user.name;
-            await task.save();
+            // Find newly added tasks (tasks that were not previously in the list)
+            const addedTasks = newPendingTasks.filter(id => !oldPendingTasks.includes(id));
+
+            for (const taskId of addedTasks) {
+                const task = await Task.findById(taskId);
+                if (!task) return res.status(400).json({ message: `Task ${taskId} not found` });
+
+                // If task was previously assigned to someone else, fix that user's pendingTasks
+                if (task.assignedUser && task.assignedUser.toString() !== userId.toString()) {
+                const oldUser = await User.findById(task.assignedUser);
+                if (oldUser) {
+                    oldUser.pendingTasks = oldUser.pendingTasks.filter(
+                    id => id.toString() !== task._id.toString()
+                    );
+                    await oldUser.save();
+                }
+                }
+
+                // Assign task to this user
+                task.assignedUser = userId;
+                task.assignedUserName = user.name;
+                await task.save();
             }
 
-            user.pendingTasks = newPendingTasks;
-        }
+            // Finally, ensure pendingTasks has unique IDs
+            user.pendingTasks = [...new Set(newPendingTasks)];
+            }
 
-        if (completedTasks) {
-            user.completedTasks = completedTasks;
-        }
-        await user.save();
+            await user.save();
 
-        res.status(200).json({message:'Ok',data: user});
+            res.status(200).json({ message: 'OK', data: user });
 
         } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server error', data: err });
+            console.error(err);
+            res.status(500).json({ message: 'Server error', data: err.message });
         }
-    });
+        });
     usersIdRoute.delete(async (req, res) => {
         try {
         const userId = req.params.id;
@@ -132,7 +145,7 @@ module.exports = function (router) {
 
         await User.findByIdAndDelete(userId);
 
-        res.status(204).send();
+        res.status(204).json({message: 'OK', data:{}});
 
         } catch (err) {
         console.error(err);
